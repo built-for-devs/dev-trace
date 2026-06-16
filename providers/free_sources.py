@@ -2,12 +2,10 @@
 from __future__ import annotations
 import re
 import hashlib
-import socket
 import requests
 
-from .envelope import field
+from .envelope import field, UA
 
-UA = {"User-Agent": "trace-local/0.2"}
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 DISPOSABLE_DOMAINS = {
@@ -31,9 +29,14 @@ except ImportError:
 # --------------------------------------------------------------------------
 # Depth 0 — Validate
 # --------------------------------------------------------------------------
-def validate(email):
-    out = {"signals": {}, "confidence_contrib": 0.0, "domain": None,
-           "is_disposable": False, "is_freemail": False}
+def validate(email: str) -> dict:
+    out: dict = {
+        "signals": {},
+        "confidence_contrib": 0.0,
+        "domain": None,
+        "is_disposable": False,
+        "is_freemail": False,
+    }
 
     syntax_ok = bool(EMAIL_RE.match(email))
     out["signals"]["syntax_valid"] = syntax_ok
@@ -45,18 +48,14 @@ def validate(email):
     out["is_disposable"] = domain in DISPOSABLE_DOMAINS
     out["is_freemail"] = domain in FREEMAIL_DOMAINS
 
-    mx_ok = None
+    mx_ok: bool | None = None
     if HAVE_DNS:
         try:
             mx_ok = len(dns.resolver.resolve(domain, "MX")) > 0
         except Exception:
             mx_ok = False
-    else:
-        try:
-            socket.gethostbyname(domain)
-            mx_ok = None  # domain resolves but MX unchecked
-        except Exception:
-            mx_ok = False
+    # Without dnspython MX is unknown — skip the socket fallback entirely
+    # because socket.gethostbyname has no timeout and can block for 30–90s.
 
     out["signals"].update({
         "mx_valid": mx_ok,
@@ -77,9 +76,12 @@ def validate(email):
 
 # --------------------------------------------------------------------------
 # Depth 1 — Gravatar
+# Privacy note: the lookup URL contains the MD5 hash of the email address.
+# This hash is visible to network observers and is reversible given a candidate
+# email list. Do not run Trace on networks where that is a concern.
 # --------------------------------------------------------------------------
-def gravatar(email):
-    out = {"found": False, "fields": {}, "github_login": None, "social_links": []}
+def gravatar(email: str) -> dict:
+    out: dict = {"found": False, "fields": {}, "github_login": None, "social_links": []}
     h = hashlib.md5(email.strip().lower().encode()).hexdigest()
     try:
         r = requests.get(f"https://en.gravatar.com/{h}.json", headers=UA, timeout=10)
@@ -126,14 +128,19 @@ def gravatar(email):
 # --------------------------------------------------------------------------
 # Free domain/company scrape (corporate emails only)
 # --------------------------------------------------------------------------
-def domain_company(domain):
+def domain_company(domain: str) -> dict:
     """Cheap company name guess from the homepage <title>. Free, no key."""
-    out = {"fields": {}}
+    out: dict = {"fields": {}}
     src = [{"provider": "domain_scrape"}]
     for scheme in ("https://", "http://"):
         try:
-            r = requests.get(scheme + domain, headers=UA, timeout=8,
-                             allow_redirects=True)
+            r = requests.get(
+                scheme + domain,
+                headers=UA,
+                timeout=8,
+                allow_redirects=True,
+                max_redirects=5,
+            )
             if r.status_code == 200 and r.text:
                 m = re.search(r"<title[^>]*>(.*?)</title>", r.text,
                               re.IGNORECASE | re.DOTALL)

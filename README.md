@@ -50,7 +50,7 @@ Where to get them:
 - **Tabstack** (paid): your Tabstack account
 - **SixtyFour** (paid): your SixtyFour account
 
-`.env` is gitignored — your keys never get committed.
+`.env` is gitignored — your keys never get committed. `.env.example` (with empty values) is intentionally committed as a template.
 
 ## Output
 
@@ -77,6 +77,10 @@ Where to get them:
 ## Notes
 
 - `dnspython` enables real MX checks; without it MX is skipped gracefully.
+  Install with `pip install dnspython` if you want MX validation.
+- Gravatar lookups include the MD5 hash of the email in the request URL.
+  This hash is visible to network observers and can be reversed given a
+  candidate email list. Don't run Trace on networks where that is a concern.
 - Tabstack/SixtyFour request shapes are scaffolds — confirm endpoints/fields
   against current API docs before relying on paid output.
 

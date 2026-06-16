@@ -1,30 +1,36 @@
 """GitHub provider (Depth 2). Free; GITHUB_TOKEN strongly recommended.
 
 Covers: identity resolution (email -> login), public profile, byte-weighted
-languages via /languages, contribution activity via GraphQL (token only),
-and derived ICP basics (seniority, role hint, OSS activity).
+languages via /languages (fetched in parallel), contribution activity via
+GraphQL (token only), and derived ICP basics (seniority, role hint, OSS activity).
 """
 from __future__ import annotations
+import concurrent.futures
 import os
 import re
 import requests
 from datetime import datetime, timezone
 
-from .envelope import field
+from .envelope import field, UA
 
 REST = "https://api.github.com"
 GQL = "https://api.github.com/graphql"
 
+# Minimum match confidence to resolve a candidate into the profile.
+# Below this threshold the candidate is recorded but not merged — avoids
+# publishing a full profile for a low-confidence email-local-part guess.
+MIN_RESOLVE_CONFIDENCE = 0.5
 
-def _headers():
-    h = {"User-Agent": "trace-local/0.2", "Accept": "application/vnd.github+json"}
+
+def _headers() -> dict[str, str]:
+    h = {**UA, "Accept": "application/vnd.github+json"}
     tok = os.environ.get("GITHUB_TOKEN")
     if tok:
         h["Authorization"] = f"Bearer {tok}"
     return h
 
 
-def _user(login):
+def _user(login: str) -> tuple[dict | None, str | None]:
     try:
         r = requests.get(f"{REST}/users/{login}", headers=_headers(), timeout=10)
     except Exception:
@@ -39,8 +45,28 @@ def _user(login):
         return None, None
 
 
-def _repo_languages(login, max_repos=25):
-    """Byte-weighted language tally across recent owned, non-fork repos."""
+def _fetch_repo_langs(repo: dict) -> dict[str, int]:
+    """Fetch byte-weighted language breakdown for one repo (called in parallel)."""
+    if not repo.get("languages_url"):
+        lang = repo.get("language")
+        return {lang: 1} if lang else {}
+    try:
+        lr = requests.get(repo["languages_url"], headers=_headers(), timeout=8)
+        if lr.status_code == 200:
+            return lr.json()
+    except Exception:
+        pass
+    lang = repo.get("language")
+    return {lang: 1} if lang else {}
+
+
+def _repo_languages(login: str, max_repos: int = 25) -> tuple[list[str], int, list[str]]:
+    """Byte-weighted language tally across recent owned, non-fork repos.
+
+    Language breakdowns for the first 12 repos are fetched in parallel.
+    Repos beyond the first 12 count toward public_repo_count only — they
+    do not contribute to language ranking, avoiding byte-vs-unit count mixing.
+    """
     try:
         r = requests.get(
             f"{REST}/users/{login}/repos", headers=_headers(), timeout=10,
@@ -54,33 +80,24 @@ def _repo_languages(login, max_repos=25):
     except Exception:
         return [], 0, []
 
-    lang_bytes, topics = {}, {}
-    count = 0
-    for repo in repos:
-        if repo.get("fork"):
-            continue
-        count += 1
+    non_fork = [repo for repo in repos if not repo.get("fork")]
+    topics: dict[str, int] = {}
+    for repo in non_fork:
         for t in (repo.get("topics") or []):
             topics[t] = topics.get(t, 0) + 1
-        # byte-weighted languages (one extra call per repo; cap to first 12)
-        if count <= 12 and repo.get("languages_url"):
-            try:
-                lr = requests.get(repo["languages_url"], headers=_headers(),
-                                  timeout=8)
-                if lr.status_code == 200:
-                    for lang, b in lr.json().items():
-                        lang_bytes[lang] = lang_bytes.get(lang, 0) + b
-            except Exception:
-                pass
-        # fallback: primary language
-        elif repo.get("language"):
-            lang_bytes[repo["language"]] = lang_bytes.get(repo["language"], 0) + 1
-    ranked_langs = sorted(lang_bytes, key=lang_bytes.get, reverse=True)
-    ranked_topics = sorted(topics, key=topics.get, reverse=True)[:10]
-    return ranked_langs, count, ranked_topics
+
+    lang_bytes: dict[str, int] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        for lang_map in ex.map(_fetch_repo_langs, non_fork[:12]):
+            for lang, b in lang_map.items():
+                lang_bytes[lang] = lang_bytes.get(lang, 0) + b
+
+    ranked_langs = sorted(lang_bytes, key=lambda k: lang_bytes[k], reverse=True)
+    ranked_topics = sorted(topics, key=lambda k: topics[k], reverse=True)[:10]
+    return ranked_langs, len(non_fork), ranked_topics
 
 
-def _contribution_activity(login):
+def _contribution_activity(login: str) -> int | None:
     """Total contributions in the last year via GraphQL. Requires a token."""
     if not os.environ.get("GITHUB_TOKEN"):
         return None
@@ -106,7 +123,7 @@ def _contribution_activity(login):
 
 
 # ----- derivations ---------------------------------------------------------
-def _derive_oss(repo_count, contributions):
+def _derive_oss(repo_count: int, contributions: int | None) -> tuple[str, float]:
     if contributions is not None:
         if contributions == 0:
             return "None", 0.6
@@ -124,7 +141,13 @@ def _derive_oss(repo_count, contributions):
     return "Active", 0.65
 
 
-def _derive_seniority(created_at):
+def _derive_seniority(created_at: str | None) -> tuple[str | None, float]:
+    """Rough bracket based on GitHub account age.
+
+    Confidence is kept low (≤0.25) because account age is a weak proxy —
+    a hobbyist with a 10-year-old account and a 10-year veteran look identical.
+    Labels are intentionally non-committal; treat as a coarse hint only.
+    """
     if not created_at:
         return None, 0.0
     try:
@@ -133,13 +156,13 @@ def _derive_seniority(created_at):
         return None, 0.0
     years = (datetime.now(timezone.utc) - created).days / 365.25
     if years < 3:
-        return "Early Career", 0.4
+        return "Early Career", 0.25
     if years < 8:
-        return "Senior", 0.45
-    return "Leadership", 0.4
+        return "Mid-Career", 0.25
+    return "Established", 0.20
 
 
-def _derive_role(langs, topics):
+def _derive_role(langs: list[str], topics: list[str]) -> tuple[str | None, float]:
     """Very rough role-type hint from stack signals. Low confidence by nature."""
     blob = " ".join(langs + topics).lower()
     if any(k in blob for k in ("react", "vue", "svelte", "css", "frontend", "tailwind")):
@@ -155,12 +178,18 @@ def _derive_role(langs, topics):
     return None, 0.0
 
 
-def enrich(gravatar_login, email):
+def enrich(gravatar_login: str | None, email: str) -> dict:
     """Resolve a GitHub identity and build fields. Returns dict with status."""
-    out = {"resolved": False, "match_confidence": 0.0, "fields": {},
-           "login": None, "candidates": [], "rate_limited": False}
+    out: dict = {
+        "resolved": False,
+        "match_confidence": 0.0,
+        "fields": {},
+        "login": None,
+        "candidates": [],
+        "rate_limited": False,
+    }
 
-    candidates = []
+    candidates: list[tuple[str, str, float]] = []
     if gravatar_login:
         candidates.append(("gravatar_link", gravatar_login, 0.85))
     local = re.sub(r"[^a-zA-Z0-9-]", "", email.split("@", 1)[0])
@@ -182,10 +211,18 @@ def enrich(gravatar_login, email):
         return out
 
     origin, login, conf, user = chosen
+
+    # Don't resolve low-confidence guesses into the profile — record as a
+    # candidate only. This prevents an email-local-part match (conf=0.35)
+    # from being emitted as canonical_identity.
+    if conf < MIN_RESOLVE_CONFIDENCE:
+        out["candidates"].append({"login": login, "origin": origin, "verified": False})
+        return out
+
     out.update(resolved=True, match_confidence=conf, login=login)
     src = [{"provider": "github"}]
 
-    def put(k, v, c, derived=False):
+    def put(k: str, v: object, c: float, derived: bool = False) -> None:
         if v not in (None, "", []):
             out["fields"][k] = field(v, c, src, derived=derived)
 

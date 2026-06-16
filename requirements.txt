@@ -1,3 +1,5 @@
 requests
 python-dotenv
-dnspython
+pytest
+# dnspython is optional: enables real MX checks; without it MX is skipped gracefully
+# pip install dnspython

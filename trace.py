@@ -142,7 +142,7 @@ def trace(email, max_depth=4):
     if tab["status"] == "ok":
         for k, v in tab["fields"].items():
             merge_field(profile, k, v)
-    meta["depth_reached"] = 3 if tab["status"] == "ok" else meta["depth_reached"]
+    meta["depth_reached"] = 3  # attempted regardless of ok/skipped_no_key
     if max_depth == 3:
         meta["overall_confidence"] = _blend(base_conf, g["found"], gres)
         return {"meta": meta, "profile": profile}
@@ -154,7 +154,7 @@ def trace(email, max_depth=4):
         meta["sixtyfour_scope"] = "customer_only"
         for k, v in sf["fields"].items():
             merge_field(profile, k, v)
-        meta["depth_reached"] = 4
+    meta["depth_reached"] = 4  # attempted regardless of ok/skipped_no_key
 
     meta["overall_confidence"] = _blend(base_conf, g["found"], gres)
     return {"meta": meta, "profile": profile}

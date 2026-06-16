@@ -125,3 +125,52 @@ class TestMergeField:
         profile: dict = {"loc": original}
         merge_field(profile, "loc", field("SF", 0.8, self._src("github")))
         assert original["conflicts"] == []  # original unchanged
+
+    # -- list union ---------------------------------------------------------
+
+    def test_list_of_dicts_unioned_by_url(self):
+        """Social links from two sources should be unioned, not conflicted."""
+        gravatar_links = [
+            {"service": "twitter", "url": "https://x.com/tessak22"},
+            {"service": "linkedin", "url": "https://linkedin.com/in/tessak22"},
+        ]
+        github_links = [
+            {"service": "twitter", "url": "https://x.com/tessak22"},
+        ]
+        profile: dict = {}
+        merge_field(profile, "social_links", field(gravatar_links, 0.7, self._src("gravatar")))
+        merge_field(profile, "social_links", field(github_links, 0.85, self._src("github")))
+        urls = [i["url"] for i in profile["social_links"]["value"]]
+        assert "https://x.com/tessak22" in urls
+        assert "https://linkedin.com/in/tessak22" in urls
+
+    def test_list_union_no_duplicates(self):
+        links = [{"service": "twitter", "url": "https://x.com/tessak22"}]
+        profile: dict = {}
+        merge_field(profile, "social_links", field(links, 0.7, self._src("gravatar")))
+        merge_field(profile, "social_links", field(links, 0.85, self._src("github")))
+        assert len(profile["social_links"]["value"]) == 1
+
+    def test_list_union_sources_merged(self):
+        links_a = [{"service": "twitter", "url": "https://x.com/a"}]
+        links_b = [{"service": "linkedin", "url": "https://linkedin.com/a"}]
+        profile: dict = {}
+        merge_field(profile, "social_links", field(links_a, 0.7, self._src("gravatar")))
+        merge_field(profile, "social_links", field(links_b, 0.85, self._src("github")))
+        providers = [s["provider"] for s in profile["social_links"]["sources"]]
+        assert "gravatar" in providers
+        assert "github" in providers
+
+    def test_list_union_no_conflict_recorded(self):
+        links_a = [{"service": "twitter", "url": "https://x.com/a"}]
+        links_b = [{"service": "linkedin", "url": "https://linkedin.com/a"}]
+        profile: dict = {}
+        merge_field(profile, "social_links", field(links_a, 0.7, self._src("gravatar")))
+        merge_field(profile, "social_links", field(links_b, 0.85, self._src("github")))
+        assert profile["social_links"]["conflicts"] == []
+
+    def test_list_of_strings_unioned(self):
+        profile: dict = {}
+        merge_field(profile, "tags", field(["python", "go"], 0.7, self._src("a")))
+        merge_field(profile, "tags", field(["go", "rust"], 0.8, self._src("b")))
+        assert set(profile["tags"]["value"]) == {"python", "go", "rust"}

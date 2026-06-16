@@ -273,7 +273,11 @@ def enrich(gravatar_login: str | None, email: str) -> dict:
     put("bio", user.get("bio"), conf)
     put("location", user.get("location"), conf)
     if user.get("company"):
-        put("current_company", user["company"].lstrip("@"), conf)
+        company = user["company"].strip().lstrip("@").strip()
+        # Title-case only when the value is all-lowercase (preserves IBM, GitHub, etc.)
+        if company == company.lower():
+            company = company.title()
+        put("current_company", company, conf)
     put("personal_website", user.get("blog"), conf)
     put("avatar_url", user.get("avatar_url"), 0.9)
     if user.get("twitter_username"):

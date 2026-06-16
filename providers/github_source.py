@@ -178,6 +178,37 @@ def _derive_role(langs: list[str], topics: list[str]) -> tuple[str | None, float
     return None, 0.0
 
 
+def _search_by_email(email: str) -> tuple[str | None, float]:
+    """Search GitHub for a user whose public profile email matches.
+
+    Only finds users who have set their email as public on GitHub.
+    Returns (login, confidence) — confidence 0.8 for a unique match,
+    0.6 when multiple accounts share the address (picks the top result).
+    Rate-limited without a token; returns (None, 0.0) on any failure.
+    """
+    try:
+        r = requests.get(
+            f"{REST}/search/users",
+            headers=_headers(),
+            params={"q": f"{email} in:email"},
+            timeout=10,
+        )
+    except Exception:
+        return None, 0.0
+    if r.status_code in (403, 422):
+        return None, 0.0
+    if r.status_code != 200:
+        return None, 0.0
+    try:
+        items = r.json().get("items", [])
+    except Exception:
+        return None, 0.0
+    if not items:
+        return None, 0.0
+    conf = 0.8 if len(items) == 1 else 0.6
+    return items[0]["login"], conf
+
+
 def enrich(gravatar_login: str | None, email: str) -> dict:
     """Resolve a GitHub identity and build fields. Returns dict with status."""
     out: dict = {
@@ -189,11 +220,21 @@ def enrich(gravatar_login: str | None, email: str) -> dict:
         "rate_limited": False,
     }
 
+    seen: set[str] = set()
+
     candidates: list[tuple[str, str, float]] = []
     if gravatar_login:
         candidates.append(("gravatar_link", gravatar_login, 0.85))
+        seen.add(gravatar_login.lower())
+
+    # Email search — finds users who have this address public on their profile
+    email_login, email_conf = _search_by_email(email)
+    if email_login and email_login.lower() not in seen:
+        candidates.append(("github_email_search", email_login, email_conf))
+        seen.add(email_login.lower())
+
     local = re.sub(r"[^a-zA-Z0-9-]", "", email.split("@", 1)[0])
-    if local and local.lower() != (gravatar_login or "").lower():
+    if local and local.lower() not in seen:
         candidates.append(("email_derived", local, 0.35))
 
     chosen = None
